@@ -1,0 +1,30 @@
+﻿# Python & Environnements
+__pycache__/
+*.py[cod]
+*.class
+.venv/
+venv/
+env/
+*.env
+
+# Airflow logs & PID
+airflow/logs/
+*.pid
+
+# Données locales & temporaires
+*.json
+*.parquet
+*.csv
+.duckdb/
+
+# Terraform state
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
