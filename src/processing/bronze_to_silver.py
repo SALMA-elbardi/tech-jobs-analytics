@@ -41,16 +41,19 @@ def extract_duration_months(text):
         return None
     c = text.lower()
     
-    weeks_match = re.search(r"\b(\d+)\s*(?:semaines|weeks)\b", c)
+    # 1. Semaines (FR & EN) : "8 semaines", "12 weeks", "24-week"
+    weeks_match = re.search(r"\b(\d+)\s*(?:semaines|semaine|weeks|week|-week)\b", c)
     if weeks_match:
         w = int(weeks_match.group(1))
         return max(1, round(w / 4))
 
-    range_match = re.search(r"(\d+)\s*(?:à|-)\s*(\d+)\s*(?:mois|months)", c)
+    # 2. Fourchettes : "4 à 6 mois", "4-6 mois", "3 to 6 months"
+    range_match = re.search(r"(\d+)\s*(?:à|-|to)\s*(\d+)\s*(?:mois|months|month|-month)", c)
     if range_match:
         return int(range_match.group(2))
 
-    month_match = re.search(r"\b([1-9]|1[0-2])\s*(?:mois|months)\b", c)
+    # 3. Durée directe en mois (FR & EN) : "6 mois", "6 months", "3-month"
+    month_match = re.search(r"\b([1-9]|1[0-2])\s*(?:mois|months|month|-month)\b", c)
     if month_match:
         return int(month_match.group(1))
 
@@ -61,13 +64,18 @@ def categorize_internship(is_internship, duration, text):
         return None
     c = (text or "").lower()
 
-    if re.search(r"\b(pfe|projet de fin d'études|fin d'etude|pré-embauche|pre-embauche)\b", c):
+    # Détection PFE / Fin d'études (FR & EN)
+    if re.search(r"\b(pfe|projet de fin d'études|fin d'études|fin d'etude|pré-embauche|pre-embauche|end-of-study|master thesis|graduation internship)\b", c):
         return "PFE"
-    if re.search(r"\b(alternance|apprentissage|contrat pro)\b", c):
+    
+    # Détection Alternance / Apprentissage
+    if re.search(r"\b(alternance|apprentissage|contrat pro|work-study|apprenticeship)\b", c):
         return "ALTERNANCE"
-    if duration == 1 or re.search(r"\b(initiation|découverte|ouvrier)\b", c):
+    
+    # Qualification selon durée
+    if duration == 1 or re.search(r"\b(initiation|découverte|ouvrier|observation)\b", c):
         return "STAGE_INITIATION"
-    elif duration in [2, 3] or re.search(r"\b(stage d'été|stage technique|application)\b", c):
+    elif duration in [2, 3] or re.search(r"\b(stage d'été|stage technique|application|summer intern|summer internship)\b", c):
         return "STAGE_APPLICATION"
     elif duration and duration >= 4:
         return "PFE"
@@ -118,8 +126,8 @@ def process_bronze_to_silver(spark):
         coalesce(col("r.location.area")[0], lit("France")).alias("location_country"),
         coalesce(col("r.location.display_name"), lit("Non spécifié")).alias("location_city"),
         to_timestamp(col("r.created")).alias("publication_date"),
-        col("r.description").alias("raw_description"),
-        col("r.contract_type").alias("raw_contract"),
+        coalesce(col("r.description"), lit("")).alias("raw_description"),
+        coalesce(col("r.contract_type"), lit("")).alias("raw_contract"),
         col("r.matched_domains").alias("matched_domains"),
         col("r.matched_roles").alias("matched_roles")
     )
@@ -135,8 +143,8 @@ def process_bronze_to_silver(spark):
         lit("Maroc").alias("location_country"),
         lit("Maroc").alias("location_city"),
         to_timestamp(col("r.scraped_at")).alias("publication_date"),
-        concat_ws(" ", col("r.summary"), col("r.raw_metadata")).alias("raw_description"),
-        col("r.raw_metadata").alias("raw_contract"),
+        concat_ws(" ", coalesce(col("r.summary"), lit("")), coalesce(col("r.raw_metadata"), lit(""))).alias("raw_description"),
+        coalesce(col("r.raw_metadata"), lit("")).alias("raw_contract"),
         col("r.matched_domains").alias("matched_domains"),
         col("r.matched_roles").alias("matched_roles")
     )
@@ -145,13 +153,15 @@ def process_bronze_to_silver(spark):
     unified_df = adzuna_unified.unionByName(rekrute_unified)
     full_text_col = concat_ws(" ", col("raw_title"), col("raw_description"), col("raw_contract"))
 
-    is_intern = (
-        lower(full_text_col).rlike(r"\b(stage|internship|intern|stagiaire|pfe|alternance|apprentissage)\b") |
+    # Détection booléenne sans valeur nulle
+    is_intern_expr = (
+        lower(full_text_col).rlike(r"\b(stage|internship|intern|stagiaire|pfe|alternance|apprentissage|apprenticeship)\b") |
         lower(col("raw_contract")).rlike(r"\b(stage|intern)\b")
     )
+    is_intern_clean = coalesce(is_intern_expr, lit(False))
 
-    contract_detected = when(lower(full_text_col).rlike(r"\b(alternance|apprentissage)\b"), lit("ALTERNANCE")) \
-        .when(is_intern, lit("STAGE")) \
+    contract_detected = when(lower(full_text_col).rlike(r"\b(alternance|apprentissage|apprenticeship)\b"), lit("ALTERNANCE")) \
+        .when(is_intern_clean, lit("STAGE")) \
         .when(lower(full_text_col).rlike(r"\b(cdi|indéterminée)\b"), lit("CDI")) \
         .when(lower(full_text_col).rlike(r"\b(cdd|déterminée)\b"), lit("CDD")) \
         .when(lower(full_text_col).rlike(r"\b(freelance|indépendant)\b"), lit("FREELANCE")) \
@@ -166,8 +176,8 @@ def process_bronze_to_silver(spark):
     enriched_df = (
         unified_df
         .withColumn("corpus", full_text_col)
+        .withColumn("is_internship", is_intern_clean)
         .withColumn("contract_type", contract_detected)
-        .withColumn("is_internship", is_intern)
         .withColumn("duration_months", udf_duration(col("corpus")))
         .withColumn("duration_bracket", udf_bracket(col("duration_months")))
         .withColumn("internship_category", udf_category(col("is_internship"), col("duration_months"), col("corpus")))
