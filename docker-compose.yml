@@ -1,0 +1,150 @@
+﻿x-airflow-common: &airflow-common
+  image: apache/airflow:2.9.2-python3.11
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__CORE__LOAD_DEFAULT_CONNECTIONS: 'false'
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+    AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+    AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+    AWS_DEFAULT_REGION: us-east-1
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/plugins:/opt/airflow/plugins
+    - ./airflow/config:/opt/airflow/config
+    - ./scripts:/opt/airflow/scripts
+    - ./spark:/opt/airflow/spark
+    - ./dbt_project:/opt/airflow/dbt_project
+  depends_on:
+    postgres:
+      condition: service_healthy
+  networks:
+    - techmarket-network
+
+services:
+  # ----------------------------------------------------
+  # 1. Base relationnelle & Data Warehouse (PostgreSQL)
+  # ----------------------------------------------------
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - techmarket-network
+
+ # ----------------------------------------------------
+  # 2. Stockage Objet compatible S3 (MinIO)
+  # ----------------------------------------------------
+  minio:
+    build:
+      context: ./minio_docker
+    container_name: minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "${MINIO_PORT}:9000"
+      - "${MINIO_CONSOLE_PORT}:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - techmarket-network
+  # ----------------------------------------------------
+  # 3. Orchestration (Airflow)
+  # ----------------------------------------------------
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    command: >
+      bash -c "
+      airflow db migrate &&
+      airflow users create \
+        --username admin \
+        --firstname Admin \
+        --lastname User \
+        --role Admin \
+        --email admin@example.com \
+        --password admin
+      "
+    restart: on-failure
+
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow-webserver
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+    restart: always
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"']
+      interval: 20s
+      timeout: 10s
+      retries: 5
+    restart: always
+
+  # ----------------------------------------------------
+  # 4. Observabilité (Prometheus & Grafana)
+  # ----------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    networks:
+      - techmarket-network
+
+  grafana:
+    image: grafana/grafana:10.4.3
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - techmarket-network
+
+networks:
+  techmarket-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  minio_data:
+  grafana_data:
