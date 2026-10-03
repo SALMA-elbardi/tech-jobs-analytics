@@ -46,7 +46,7 @@ services:
     networks:
       - techmarket-network
 
- # ----------------------------------------------------
+  # ----------------------------------------------------
   # 2. Stockage Objet compatible S3 (MinIO)
   # ----------------------------------------------------
   minio:
@@ -63,6 +63,7 @@ services:
       - minio_data:/data
     networks:
       - techmarket-network
+
   # ----------------------------------------------------
   # 3. Orchestration (Airflow)
   # ----------------------------------------------------
@@ -137,6 +138,26 @@ services:
       - grafana_data:/var/lib/grafana
     depends_on:
       - prometheus
+    networks:
+      - techmarket-network
+
+ # ----------------------------------------------------
+  # 5. Traitement Distribué (Apache Spark)
+  # ----------------------------------------------------
+  spark:
+    image: apache/spark:3.5.1
+    container_name: spark
+    user: root
+    environment:
+      - MINIO_ENDPOINT=http://minio:9000
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD}
+    volumes:
+      - ./src:/opt/spark/work-dir/src
+    working_dir: /opt/spark/work-dir
+    command: tail -f /dev/null
     networks:
       - techmarket-network
 
