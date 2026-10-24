@@ -16,10 +16,7 @@ def create_spark_session():
     minio_password = os.getenv("MINIO_ROOT_PASSWORD")
 
     if not minio_user or not minio_password:
-        raise ValueError(
-            "Identifiants MinIO manquants ! Vérifiez que MINIO_ROOT_USER et "
-            "MINIO_ROOT_PASSWORD sont bien définis dans l'environnement."
-        )
+        raise ValueError("Identifiants MinIO manquants !")
 
     spark = (
         SparkSession.builder
@@ -40,46 +37,31 @@ def extract_duration_months(text):
     if not text:
         return None
     c = text.lower()
-    
-    # 1. Semaines (FR & EN) : "8 semaines", "12 weeks", "24-week"
     weeks_match = re.search(r"\b(\d+)\s*(?:semaines|semaine|weeks|week|-week)\b", c)
     if weeks_match:
-        w = int(weeks_match.group(1))
-        return max(1, round(w / 4))
-
-    # 2. Fourchettes : "4 à 6 mois", "4-6 mois", "3 to 6 months"
+        return max(1, round(int(weeks_match.group(1)) / 4))
     range_match = re.search(r"(\d+)\s*(?:à|-|to)\s*(\d+)\s*(?:mois|months|month|-month)", c)
     if range_match:
         return int(range_match.group(2))
-
-    # 3. Durée directe en mois (FR & EN) : "6 mois", "6 months", "3-month"
     month_match = re.search(r"\b([1-9]|1[0-2])\s*(?:mois|months|month|-month)\b", c)
     if month_match:
         return int(month_match.group(1))
-
     return None
 
 def categorize_internship(is_internship, duration, text):
     if not is_internship:
         return None
     c = (text or "").lower()
-
-    # Détection PFE / Fin d'études (FR & EN)
     if re.search(r"\b(pfe|projet de fin d'études|fin d'études|fin d'etude|pré-embauche|pre-embauche|end-of-study|master thesis|graduation internship)\b", c):
         return "PFE"
-    
-    # Détection Alternance / Apprentissage
     if re.search(r"\b(alternance|apprentissage|contrat pro|work-study|apprenticeship)\b", c):
         return "ALTERNANCE"
-    
-    # Qualification selon durée
     if duration == 1 or re.search(r"\b(initiation|découverte|ouvrier|observation)\b", c):
         return "STAGE_INITIATION"
     elif duration in [2, 3] or re.search(r"\b(stage d'été|stage technique|application|summer intern|summer internship)\b", c):
         return "STAGE_APPLICATION"
     elif duration and duration >= 4:
         return "PFE"
-
     return "STAGE_NON_SPECIFIE"
 
 def compute_duration_bracket(duration):
@@ -100,7 +82,7 @@ def detect_work_mode(text):
     c = text.lower()
     if re.search(r"\b(full remote|100% remote|100% télétravail|télétravail total)\b", c):
         return "FULL_REMOTE"
-    elif re.search(r"\b(hybride|hybrid|télétravail partiel|remote partiel)\b", c):
+    elif re.search(r"\b(hybride|hybrid|télétravail partiel)\b", c):
         return "HYBRID"
     elif re.search(r"\b(remote|télétravail)\b", c):
         return "REMOTE_POSSIBLE"
@@ -115,45 +97,121 @@ def process_bronze_to_silver(spark):
     bronze_bucket = "s3a://bronze"
     silver_bucket = "s3a://silver/tech_jobs"
 
-    print(">>> [1/5] Lecture multiline des données brutes Adzuna...")
-    adzuna_raw = spark.read.option("multiline", "true").json(f"{bronze_bucket}/api_adzuna/*/*.json")
-    adzuna_df = adzuna_raw.selectExpr("explode(records) as r")
-    adzuna_unified = adzuna_df.select(
-        lit("adzuna_api").alias("source"),
-        col("r.id").cast(StringType()).alias("source_job_id"),
-        col("r.title").alias("raw_title"),
-        coalesce(col("r.company.display_name"), lit("Non spécifié")).alias("company_name"),
-        coalesce(col("r.location.area")[0], lit("France")).alias("location_country"),
-        coalesce(col("r.location.display_name"), lit("Non spécifié")).alias("location_city"),
-        to_timestamp(col("r.created")).alias("publication_date"),
-        coalesce(col("r.description"), lit("")).alias("raw_description"),
-        coalesce(col("r.contract_type"), lit("")).alias("raw_contract"),
-        col("r.matched_domains").alias("matched_domains"),
-        col("r.matched_roles").alias("matched_roles")
-    )
+    dfs = []
 
-    print(">>> [2/5] Lecture multiline des données brutes ReKrute...")
-    rekrute_raw = spark.read.option("multiline", "true").json(f"{bronze_bucket}/scraper_rekrute/*/*.json")
-    rekrute_df = rekrute_raw.selectExpr("explode(records) as r")
-    rekrute_unified = rekrute_df.select(
-        lit("rekrute_scraper").alias("source"),
-        col("r.job_url").alias("source_job_id"),
-        col("r.title").alias("raw_title"),
-        coalesce(col("r.company"), lit("Non spécifié")).alias("company_name"),
-        lit("Maroc").alias("location_country"),
-        lit("Maroc").alias("location_city"),
-        to_timestamp(col("r.scraped_at")).alias("publication_date"),
-        concat_ws(" ", coalesce(col("r.summary"), lit("")), coalesce(col("r.raw_metadata"), lit(""))).alias("raw_description"),
-        coalesce(col("r.raw_metadata"), lit("")).alias("raw_contract"),
-        col("r.matched_domains").alias("matched_domains"),
-        col("r.matched_roles").alias("matched_roles")
-    )
+    # 1. Source Adzuna
+    try:
+        raw_adzuna = (
+            spark.read
+            .option("multiline", "true")
+            .option("recursiveFileLookup", "true")
+            .json(f"{bronze_bucket}/api_adzuna")
+        )
+        df_adzuna = raw_adzuna.selectExpr("explode(records) as r").select(
+            lit("adzuna_api").alias("source"),
+            col("r.id").cast(StringType()).alias("source_job_id"),
+            col("r.title").alias("raw_title"),
+            coalesce(col("r.company.display_name"), lit("Non spécifié")).alias("company_name"),
+            coalesce(col("r.location.area")[0], lit("France")).alias("location_country"),
+            coalesce(col("r.location.display_name"), lit("Non spécifié")).alias("location_city"),
+            to_timestamp(col("r.created")).alias("publication_date"),
+            coalesce(col("r.description"), lit("")).alias("raw_description"),
+            coalesce(col("r.contract_type"), lit("")).alias("raw_contract"),
+            col("r.matched_domains").alias("matched_domains"),
+            col("r.matched_roles").alias("matched_roles")
+        )
+        dfs.append(df_adzuna)
+        print(">>> [BRONZE] Adzuna chargé avec succès.")
+    except Exception as e:
+        print(f"Info Adzuna non chargé : {e}")
 
-    print(">>> [3/5] Harmonisation & Application des règles métier...")
-    unified_df = adzuna_unified.unionByName(rekrute_unified)
+    # 2. Source ReKrute
+    try:
+        raw_rekrute = (
+            spark.read
+            .option("multiline", "true")
+            .option("recursiveFileLookup", "true")
+            .json(f"{bronze_bucket}/scraper_rekrute")
+        )
+        df_rekrute = raw_rekrute.selectExpr("explode(records) as r").select(
+            lit("rekrute_scraper").alias("source"),
+            col("r.job_url").alias("source_job_id"),
+            col("r.title").alias("raw_title"),
+            coalesce(col("r.company"), lit("Non spécifié")).alias("company_name"),
+            lit("Maroc").alias("location_country"),
+            lit("Maroc").alias("location_city"),
+            to_timestamp(col("r.scraped_at")).alias("publication_date"),
+            concat_ws(" ", coalesce(col("r.summary"), lit("")), coalesce(col("r.raw_metadata"), lit(""))).alias("raw_description"),
+            coalesce(col("r.raw_metadata"), lit("")).alias("raw_contract"),
+            col("r.matched_domains").alias("matched_domains"),
+            col("r.matched_roles").alias("matched_roles")
+        )
+        dfs.append(df_rekrute)
+        print(">>> [BRONZE] ReKrute chargé avec succès.")
+    except Exception as e:
+        print(f"Info ReKrute non chargé : {e}")
+
+    # 3. Source Emploi.ma
+    try:
+        raw_emploima = (
+            spark.read
+            .option("multiline", "true")
+            .option("recursiveFileLookup", "true")
+            .json(f"{bronze_bucket}/scraper_emploima")
+        )
+        df_emploima = raw_emploima.selectExpr("explode(records) as r").select(
+            lit("emploima_scraper").alias("source"),
+            col("r.job_url").alias("source_job_id"),
+            col("r.title").alias("raw_title"),
+            coalesce(col("r.company"), lit("Non spécifié")).alias("company_name"),
+            lit("Maroc").alias("location_country"),
+            coalesce(col("r.location_city"), lit("Maroc")).alias("location_city"),
+            to_timestamp(col("r.scraped_at")).alias("publication_date"),
+            concat_ws(" ", coalesce(col("r.summary"), lit("")), coalesce(col("r.raw_metadata"), lit(""))).alias("raw_description"),
+            coalesce(col("r.raw_metadata"), lit("")).alias("raw_contract"),
+            col("r.matched_domains").alias("matched_domains"),
+            col("r.matched_roles").alias("matched_roles")
+        )
+        dfs.append(df_emploima)
+        print(">>> [BRONZE] Emploi.ma chargé avec succès.")
+    except Exception as e:
+        print(f"Info Emploi.ma non chargé : {e}")
+
+    # 4. Source Dreamjob
+    try:
+        raw_dreamjob = (
+            spark.read
+            .option("multiline", "true")
+            .option("recursiveFileLookup", "true")
+            .json(f"{bronze_bucket}/scraper_dreamjob")
+        )
+        df_dreamjob = raw_dreamjob.selectExpr("explode(records) as r").select(
+            lit("dreamjob_scraper").alias("source"),
+            col("r.job_url").alias("source_job_id"),
+            col("r.title").alias("raw_title"),
+            coalesce(col("r.company"), lit("Non spécifié")).alias("company_name"),
+            lit("Maroc").alias("location_country"),
+            coalesce(col("r.location_city"), lit("Maroc")).alias("location_city"),
+            to_timestamp(col("r.scraped_at")).alias("publication_date"),
+            concat_ws(" ", coalesce(col("r.summary"), lit("")), coalesce(col("r.raw_metadata"), lit(""))).alias("raw_description"),
+            coalesce(col("r.raw_metadata"), lit("")).alias("raw_contract"),
+            col("r.matched_domains").alias("matched_domains"),
+            col("r.matched_roles").alias("matched_roles")
+        )
+        dfs.append(df_dreamjob)
+        print(">>> [BRONZE] Dreamjob chargé avec succès.")
+    except Exception as e:
+        print(f"Info Dreamjob non chargé : {e}")
+
+    if not dfs:
+        raise ValueError("Aucun fichier source Bronze trouvé dans MinIO !")
+
+    unified_df = dfs[0]
+    for next_df in dfs[1:]:
+        unified_df = unified_df.unionByName(next_df)
+
     full_text_col = concat_ws(" ", col("raw_title"), col("raw_description"), col("raw_contract"))
 
-    # Détection booléenne sans valeur nulle
     is_intern_expr = (
         lower(full_text_col).rlike(r"\b(stage|internship|intern|stagiaire|pfe|alternance|apprentissage|apprenticeship)\b") |
         lower(col("raw_contract")).rlike(r"\b(stage|intern)\b")
@@ -183,13 +241,12 @@ def process_bronze_to_silver(spark):
         .withColumn("internship_category", udf_category(col("is_internship"), col("duration_months"), col("corpus")))
         .withColumn("is_remunerated", is_remunerated_detected)
         .withColumn("work_mode", udf_work_mode(col("corpus")))
-        .withColumn("job_fingerprint", sha2(concat_ws("||", col("source"), col("source_job_id")), 256))
         .withColumn("job_title_clean", lower(col("raw_title")))
-        .withColumn("primary_domain", col("matched_domains")[0])
+        .withColumn("job_fingerprint", sha2(concat_ws("||", lower(col("raw_title")), lower(col("company_name")), lower(col("location_city"))), 256))
+        .withColumn("primary_domain", coalesce(col("matched_domains")[0], lit("NON_CLASSE")))
         .withColumn("ingested_at", to_timestamp(lit(datetime.now(timezone.utc).isoformat())))
     )
 
-    print(">>> [4/5] Déduplication globale...")
     deduplicated_df = enriched_df.dropDuplicates(["job_fingerprint"])
 
     final_df = (
@@ -222,7 +279,6 @@ def process_bronze_to_silver(spark):
         "month"
     )
 
-    print(f">>> [5/5] Écriture Parquet partitionnée dans MinIO Silver...")
     (
         silver_table.write
         .mode("overwrite")
@@ -230,7 +286,13 @@ def process_bronze_to_silver(spark):
         .parquet(silver_bucket)
     )
 
-    print(f">>> [TERMINÉ] {silver_table.count()} offres unifiées écrites avec succès dans la couche Silver !")
+    total_count = silver_table.count()
+    stages_count = silver_table.filter(col("is_internship") == True).count()
+    print("\n==========================================")
+    print(">>> SUCCÈS COUCHE SILVER :")
+    print(f"    - Total offres uniques consolidées : {total_count}")
+    print(f"    - Total stages/PFE/alternances     : {stages_count}")
+    print("==========================================\n")
 
 if __name__ == "__main__":
     spark = create_spark_session()
