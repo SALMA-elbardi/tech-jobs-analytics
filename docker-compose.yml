@@ -7,16 +7,24 @@
     AIRFLOW__CORE__LOAD_DEFAULT_CONNECTIONS: 'false'
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
-    AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
-    AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
-    AWS_DEFAULT_REGION: us-east-1
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW__WEBSERVER__SECRET_KEY:-airflow_super_secret_key_2026}
+    PYTHONPATH: /opt/airflow
+    # Variables MinIO requises par les scripts
+    MINIO_ENDPOINT: http://minio:9000
+    MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+    MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    MINIO_BRONZE_BUCKET: bronze
+    # Variables Adzuna API
+    ADZUNA_APP_ID: ${ADZUNA_APP_ID}
+    ADZUNA_APP_KEY: ${ADZUNA_APP_KEY}
+    # Webhook Discord
+    ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL}
   volumes:
     - ./airflow/dags:/opt/airflow/dags
     - ./airflow/plugins:/opt/airflow/plugins
     - ./airflow/config:/opt/airflow/config
-    - ./scripts:/opt/airflow/scripts
-    - ./spark:/opt/airflow/spark
-    - ./dbt_project:/opt/airflow/dbt_project
+    - ./src:/opt/airflow/src
+    - /var/run/docker.sock:/var/run/docker.sock
   depends_on:
     postgres:
       condition: service_healthy
@@ -25,7 +33,7 @@
 
 services:
   # ----------------------------------------------------
-  # 1. Base relationnelle & Data Warehouse (PostgreSQL)
+  # 1. Base relationnelle & Métadonnées (PostgreSQL)
   # ----------------------------------------------------
   postgres:
     image: postgres:15-alpine
@@ -108,41 +116,7 @@ services:
     restart: always
 
   # ----------------------------------------------------
-  # 4. Observabilité (Prometheus & Grafana)
-  # ----------------------------------------------------
-  prometheus:
-    image: prom/prometheus:v2.52.0
-    container_name: prometheus
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
-      - '--web.console.templates=/usr/share/prometheus/consoles'
-    networks:
-      - techmarket-network
-
-  grafana:
-    image: grafana/grafana:10.4.3
-    container_name: grafana
-    ports:
-      - "3000:3000"
-    environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-      - GF_USERS_ALLOW_SIGN_UP=false
-    volumes:
-      - grafana_data:/var/lib/grafana
-    depends_on:
-      - prometheus
-    networks:
-      - techmarket-network
-
- # ----------------------------------------------------
-  # 5. Traitement Distribué (Apache Spark)
+  # 4. Traitement Distribué (Apache Spark)
   # ----------------------------------------------------
   spark:
     image: apache/spark:3.5.1
@@ -168,4 +142,3 @@ networks:
 volumes:
   postgres_data:
   minio_data:
-  grafana_data:

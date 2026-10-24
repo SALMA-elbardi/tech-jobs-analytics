@@ -8,8 +8,8 @@ from pyspark.sql.functions import (
 
 def create_spark_session():
     minio_endpoint = os.getenv("MINIO_ENDPOINT", "http://minio:9000")
-    minio_user = os.getenv("MINIO_ROOT_USER")
-    minio_password = os.getenv("MINIO_ROOT_PASSWORD")
+    minio_user = os.getenv("MINIO_ROOT_USER", "minioadmin")
+    minio_password = os.getenv("MINIO_ROOT_PASSWORD", "minioadmin")
 
     spark = (
         SparkSession.builder
@@ -23,8 +23,16 @@ def create_spark_session():
         .config("spark.sql.parquet.compression.codec", "snappy")
         .getOrCreate()
     )
+    return spark
 
-    print(">>> [GOLD] Lecture des données Silver...")
+def process_silver_to_gold(spark):
+    bucket_silver = os.getenv("MINIO_SILVER_BUCKET", "silver")
+    bucket_gold = os.getenv("MINIO_GOLD_BUCKET", "gold")
+    
+    silver_path = f"s3a://{bucket_silver}/"
+    gold_base_path = f"s3a://{bucket_gold}"
+
+    print(f">>> [GOLD] Lecture des données Silver depuis {silver_path}...")
     df_silver = spark.read.parquet(silver_path).cache()
 
     # ---------------------------------------------------------
@@ -134,10 +142,10 @@ def create_spark_session():
 
     print("\n==========================================")
     print(">>> SUCCÈS COUCHE GOLD :")
-    print(f"    - dim_company         : {dim_company.count()} entreprises uniques")
-    print(f"    - dim_location        : {dim_location.count()} localisations uniques")
-    print(f"    - fact_job_postings   : {fact_jobs.count()} lignes de faits globales")
-    print(f"    - fact_internships_pfe: {fact_stages.count()} opportunités de stages qualifiées")
+    print(f"    - dim_company          : {dim_company.count()} entreprises uniques")
+    print(f"    - dim_location         : {dim_location.count()} localisations uniques")
+    print(f"    - fact_job_postings    : {fact_jobs.count()} lignes de faits globales")
+    print(f"    - fact_internships_pfe : {fact_stages.count()} opportunités de stages qualifiées")
     print("==========================================\n")
 
 if __name__ == "__main__":
