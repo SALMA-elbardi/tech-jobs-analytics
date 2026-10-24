@@ -14,22 +14,19 @@ def on_failure_notify(context):
 default_args = {
     "owner": "data_engineering",
     "depends_on_past": False,
-    "email_on_failure": False,
-    "email_on_retry": False,
     "retries": 1,
-    "retry_delay": timedelta(minutes=2),
-    "on_failure_callback": on_failure_notify
+    "retry_delay": timedelta(minutes=5),
+    
 }
 
 with DAG(
-    dag_id="tech_jobs_lakehouse_pipeline",
+    dag_id='tech_jobs_lakehouse_pipeline',
     default_args=default_args,
-    description="Pipeline end-to-end : Scraping Bronze -> Silver Spark -> Quality Gate -> Gold Spark",
-    schedule_interval="@daily",
-    start_date=datetime(2026, 1, 1),
-    catchup=False,
-    max_active_runs=1,
-    tags=["tech-jobs", "minio", "spark", "data-quality", "production"]
+    description='Pipeline Lakehouse Medallion pour le marché tech marocain',
+    schedule_interval='0 2 * * *',  # Exécution quotidienne automatique à 02:00 AM UTC
+    start_date=datetime(2026, 10, 1),
+    catchup=False,  # Évite de rejouer tout l'historique depuis le start_date
+    tags=['tech_jobs', 'lakehouse', 'medallion', 'spark'],
 ) as dag:
 
     start_pipeline = EmptyOperator(task_id="start_pipeline")
